@@ -1,0 +1,26 @@
+server:
+  port: 8080
+spring:
+  servlet:
+    multipart:
+      max-file-size: 21MB
+      max-request-size: 21MB
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/contextos}
+    username: ${SPRING_DATASOURCE_USERNAME:contextos}
+    password: ${SPRING_DATASOURCE_PASSWORD:change-me-local}
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/migration/V1__init.sql
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+contextos:
+  ai-base-url: ${AI_BASE_URL:http://localhost:8000}
+  storage: ${FILE_STORAGE_PATH:./uploads}
+  max-upload-bytes: ${MAX_UPLOAD_BYTES:20971520}
