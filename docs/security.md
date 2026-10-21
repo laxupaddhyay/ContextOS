@@ -1,6 +1,8 @@
 # Security notes
 
 - Local identity is a fixed development UUID supplied through `X-User-Id`; it is not authentication. Replace it with verified OIDC subject claims before deployment.
+- The AI `/answer` endpoint requires `X-Service-Token`, which the API adds from `AI_SERVICE_TOKEN`. Set a unique random value in `.env`; the built-in fallback token is public and local-development-only.
+- Browser CORS is restricted to the local Vite origin. Configure the exact trusted frontend origin before deployment.
 - Membership is checked server-side. Unknown workspace and non-member responses do not disclose whether a workspace exists.
 - Document text is treated as untrusted data in the AI system prompt. No tools are exposed to the model.
 - Uploaded names are reduced to a basename and sanitized for the storage key. Upload size and extension are checked; parser validation happens asynchronously.

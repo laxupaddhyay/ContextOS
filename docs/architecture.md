@@ -4,8 +4,8 @@ The local demo is a modular monolith API plus a separate AI service. Spring Boot
 
 ## Trust boundary
 
-The browser is untrusted. Every workspace API resolves the development identity and checks membership on the server. The `/ask` path queries `document_chunks` joined to documents by the requested workspace and READY status before sending passage text to the AI service. The AI endpoint is intended for the internal Compose network and should not be published independently in a deployment.
+The browser is untrusted. Every workspace API resolves the development identity and checks membership on the server. The `/ask` path queries `document_chunks` joined to documents by the requested workspace and READY status before sending passage text to the AI service. The AI endpoint also checks a shared service token; keep it secret and restrict network access in deployment.
 
 ## Prototype limitations
 
-The current retrieval helper uses lexical overlap, and this schema stores text chunks but not embeddings. The plan's pgvector, hybrid retrieval, reranking, evaluation, robust OIDC, bounded retries/DLQ, and production observability remain follow-on work. Avoid presenting this prototype as a fully realized production RAG system.
+The API narrows candidates with PostgreSQL full-text search, then the AI service reranks the candidates with BM25. PDF passages retain page numbers; chunks overlap to reduce boundary loss. Failed jobs have a three-attempt bound, and a scheduled recovery pass reclaims queued or stale work. This schema stores text chunks but not embeddings. The plan's pgvector semantic retrieval, model reranking, evaluation, robust OIDC, dead-letter handling, and production observability remain follow-on work. Avoid presenting this prototype as a fully realized production RAG system.

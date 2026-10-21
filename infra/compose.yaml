@@ -5,7 +5,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-contextos}
       POSTGRES_USER: ${POSTGRES_USER:-contextos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local}
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data", "../services/api/src/main/resources/db/migration/V1__init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-contextos} -d ${POSTGRES_DB:-contextos}"]
@@ -14,14 +14,14 @@ services:
       retries: 20
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    ports: ["5672:5672", "15672:15672"]
+    ports: ["127.0.0.1:5672:5672", "127.0.0.1:15672:15672"]
   ai:
     build: ../services/ai
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GENERATION_MODEL: ${GENERATION_MODEL:-gpt-4o-mini}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-    ports: ["8000:8000"]
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-dev-only-change-me}
+    ports: ["127.0.0.1:8000:8000"]
   api:
     build: ../services/api
     environment:
@@ -29,10 +29,11 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-contextos}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local}
       AI_BASE_URL: http://ai:8000
+      AI_SERVICE_TOKEN: ${AI_SERVICE_TOKEN:-dev-only-change-me}
       RABBITMQ_HOST: rabbitmq
       FILE_STORAGE_PATH: /data/uploads
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-20971520}
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     volumes: ["uploads:/data/uploads"]
     depends_on:
       db: { condition: service_healthy }
@@ -40,7 +41,7 @@ services:
       ai: { condition: service_started }
   web:
     build: ../apps/web
-    ports: ["5173:5173"]
+    ports: ["127.0.0.1:5173:5173"]
     depends_on: [api]
 volumes:
   pgdata:

@@ -22,5 +22,6 @@ management:
         include: health,info
 contextos:
   ai-base-url: ${AI_BASE_URL:http://localhost:8000}
+  ai-service-token: ${AI_SERVICE_TOKEN:dev-only-change-me}
   storage: ${FILE_STORAGE_PATH:./uploads}
   max-upload-bytes: ${MAX_UPLOAD_BYTES:20971520}
