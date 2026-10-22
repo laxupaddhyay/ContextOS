@@ -7,7 +7,16 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (id UUID PRIMARY KEY, document_id UUID
 CREATE TABLE IF NOT EXISTS document_chunks (id UUID PRIMARY KEY, document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE, workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, chunk_index INT NOT NULL, content TEXT NOT NULL, page_number INT, section_title TEXT, metadata JSONB NOT NULL DEFAULT '{}', UNIQUE(document_id,chunk_index));
 CREATE INDEX IF NOT EXISTS chunks_scope_idx ON document_chunks(workspace_id,document_id);
 CREATE INDEX IF NOT EXISTS chunks_content_search_idx ON document_chunks USING GIN (to_tsvector('simple',content));
-CREATE TABLE IF NOT EXISTS conversations (id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES workspaces(id), created_by UUID NOT NULL REFERENCES users(id), title TEXT NOT NULL DEFAULT 'New conversation', created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS conversations (id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES workspaces(id), created_by UUID NOT NULL REFERENCES users(id), title TEXT NOT NULL DEFAULT 'New conversation', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS conversations_workspace_updated_idx ON conversations(workspace_id,updated_at DESC);
 CREATE TABLE IF NOT EXISTS messages (id UUID PRIMARY KEY, conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), metadata JSONB NOT NULL DEFAULT '{}');
+CREATE SEQUENCE IF NOT EXISTS messages_sequence_no_seq;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sequence_no BIGINT;
+ALTER TABLE messages ALTER COLUMN sequence_no SET DEFAULT nextval('messages_sequence_no_seq');
+UPDATE messages SET sequence_no=nextval('messages_sequence_no_seq') WHERE sequence_no IS NULL;
+ALTER TABLE messages ALTER COLUMN sequence_no SET NOT NULL;
+CREATE INDEX IF NOT EXISTS messages_conversation_sequence_idx ON messages(conversation_id,sequence_no);
 CREATE TABLE IF NOT EXISTS feedback (id UUID PRIMARY KEY, message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES users(id), rating INT NOT NULL CHECK(rating BETWEEN 1 AND 5), comment TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX IF NOT EXISTS feedback_message_user_idx ON feedback(message_id,user_id);
 CREATE TABLE IF NOT EXISTS audit_events (id UUID PRIMARY KEY, workspace_id UUID REFERENCES workspaces(id), actor_user_id UUID REFERENCES users(id), event_type TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id UUID, created_at TIMESTAMPTZ NOT NULL DEFAULT now());

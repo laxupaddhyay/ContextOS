@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { BookOpen, Files, Plus, Send, ShieldCheck, Sparkles, UploadCloud } from 'lucide-react';
+import { BookOpen, Files, Plus, Send, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, UploadCloud } from 'lucide-react';
 
 const API = 'http://localhost:8080/api/v1';
 const USER = '00000000-0000-0000-0000-000000000001';
@@ -8,18 +8,21 @@ type Workspace = { id: string; name: string; role: string };
 type Doc = { id: string; filename: string; status: string; failure_code?: string | null };
 type Citation = { documentId: string; filename: string; page: number | null; chunkId: string; quote: string };
 type RequestMeta = { latencyMs?: number; model?: string; usage?: { inputTokens?: number; outputTokens?: number } };
+type Conversation = { id: string; title: string; last_message?: string };
+type ChatMessage = { id: string; role: 'USER' | 'ASSISTANT'; content: string; metadata?: RequestMeta & { citations?: Citation[] }; rating?: number | null };
 
 export default function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState('');
   const [docs, setDocs] = useState<Doc[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversation, setConversation] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [citations, setCitations] = useState<Citation[]>([]);
-  const [requestMeta, setRequestMeta] = useState<RequestMeta>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const loadStarted = useRef(false);
+  const initializedWorkspace = useRef('');
 
   async function load() {
     try {
@@ -59,6 +62,50 @@ export default function App() {
     return () => clearInterval(interval);
   }, [workspace]);
 
+  async function refreshMessages(id: string) {
+    const response = await fetch(`${API}/conversations/${id}/messages`, { headers: { 'X-User-Id': USER } });
+    if (!response.ok) throw new Error('Could not load this conversation');
+    const result: ChatMessage[] = await response.json();
+    setMessages(result);
+  }
+
+  useEffect(() => {
+    if (!workspace || initializedWorkspace.current === workspace) return;
+    initializedWorkspace.current = workspace;
+    (async () => {
+      try {
+        let response = await fetch(`${API}/workspaces/${workspace}/conversations`, { headers: { 'X-User-Id': USER } });
+        if (!response.ok) throw new Error('Could not load conversations');
+        let items: Conversation[] = await response.json();
+        if (!items.length) {
+          response = await fetch(`${API}/workspaces/${workspace}/conversations`, { method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+          if (!response.ok) throw new Error('Could not start a conversation');
+          items = [await response.json()];
+        }
+        setConversations(items);
+        setConversation(items[0].id);
+      } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    })();
+  }, [workspace]);
+
+  useEffect(() => {
+    if (!conversation) return;
+    refreshMessages(conversation).catch(e => setError(e instanceof Error ? e.message : String(e)));
+  }, [conversation]);
+
+  async function newConversation() {
+    if (!workspace) return;
+    try {
+      const response = await fetch(`${API}/workspaces/${workspace}/conversations`, { method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      if (!response.ok) throw new Error('Could not start a conversation');
+      const created: Conversation = await response.json();
+      setConversations(items => [created, ...items]);
+      setConversation(created.id);
+      setMessages([]);
+      setError('');
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+  }
+
   async function upload(file?: File) {
     if (!file || !workspace) return;
     setError('');
@@ -97,23 +144,31 @@ export default function App() {
 
   async function ask(event: FormEvent) {
     event.preventDefault();
-    if (!question.trim() || !workspace) return;
-    setBusy(true); setError(''); setAnswer(''); setCitations([]); setRequestMeta({});
+    if (!question.trim() || !conversation) return;
+    setBusy(true); setError('');
     try {
-      const response = await fetch(`${API}/workspaces/${workspace}/ask`, {
+      const response = await fetch(`${API}/conversations/${conversation}/messages`, {
         method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || 'Request failed');
-      setAnswer(result.answer);
-      setCitations(result.citations || []);
-      setRequestMeta({ latencyMs: result.latencyMs, model: result.model, usage: result.usage });
+      setMessages(current => [...current, result.userMessage, result.assistantMessage]);
+      setConversations(items => items.map(item => item.id === conversation ? { ...item, title: item.title === 'New conversation' ? question.slice(0, 80) : item.title, last_message: result.assistantMessage.content } : item));
+      setQuestion('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function rateMessage(id: string, rating: number) {
+    try {
+      const response = await fetch(`${API}/messages/${id}/feedback`, { method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }) });
+      if (!response.ok) throw new Error('Could not save feedback');
+      setMessages(current => current.map(message => message.id === id ? { ...message, rating } : message));
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
   }
 
   const browseFiles = (file?: File) => upload(file);
@@ -126,9 +181,10 @@ export default function App() {
       <div className="brand"><span className="mark"><Sparkles size={19} /></span><span>context<span className="brand-light">OS</span></span></div>
       <div className="side-label">WORKSPACE</div>
       <button className="workspace"><span className="workspace-dot">P</span><span>{workspaces[0]?.name || 'Loading…'}</span><span className="chevron">⌄</span></button>
-      <div className="side-label source-label">YOUR KNOWLEDGE <Plus size={14} /></div>
+      <div className="side-label source-label">YOUR KNOWLEDGE</div>
       <div className="nav-item active"><Files size={17} /> Documents <span className="count">{docs.length}</span></div>
-      <div className="nav-item"><BookOpen size={17} /> Ask ContextOS</div>
+      <div className="side-label chat-label">RECENT CHATS <button onClick={newConversation} title="New conversation"><Plus size={14} /></button></div>
+      <div className="chat-list">{conversations.map(item => <button key={item.id} className={`chat-link ${conversation === item.id ? 'selected' : ''}`} onClick={() => setConversation(item.id)}><BookOpen size={14} /><span>{item.title}</span></button>)}</div>
       <div className="sidebar-bottom">
         <div className="secure"><ShieldCheck size={16} /><span>Workspace protected<br /><small>Your data stays scoped</small></span></div>
         <div className="profile"><div className="avatar">JD</div><div>Jordan Davis<small>Workspace admin</small></div><span className="dots">•••</span></div>
@@ -140,8 +196,18 @@ export default function App() {
       {error && <div className="error" role="alert">{error}</div>}
       <section className="content">
         <div className="chat-area">
-          <div className="welcome"><div className="welcome-icon"><Sparkles size={22} /></div><div className="eyebrow">YOUR AI KNOWLEDGE ASSISTANT</div><h2>What would you like to know?</h2><p>Ask a question about the documents in your workspace. ContextOS will find relevant passages and show you exactly where the answer comes from.</p><div className="suggestions"><button onClick={() => setQuestion('What are the key policies in the uploaded documents?')}>Summarize our key policies <span>↗</span></button><button onClick={() => setQuestion('What process should new team members follow?')}>How do our processes work? <span>↗</span></button></div></div>
-          {(answer || busy) && <div className="response"><div className="response-head"><span className="assistant-mark"><Sparkles size={15} /></span><strong>ContextOS</strong><span className="verified"><ShieldCheck size={13} /> Source checked</span></div>{busy ? <p>Searching your workspace…</p> : <><p className="answer-text">{answer}</p><div className="answer-meta">{requestMeta.model}{requestMeta.latencyMs !== undefined && ` · ${requestMeta.latencyMs} ms`}{requestMeta.usage && ` · ${requestMeta.usage.inputTokens ?? 0} in / ${requestMeta.usage.outputTokens ?? 0} out tokens`}</div>{citations.length > 0 && <div className="citation-list"><div className="citation-title">SOURCES <span>{citations.length}</span></div>{citations.map(citation => <article className="citation" key={citation.chunkId}><div className="file-icon">▤</div><div><strong>{citation.filename}</strong><small>{citation.page ? `Page ${citation.page} · ` : ''}Source passage</small><p>“{citation.quote}”</p></div></article>)}</div>}</>}</div>}
+          {messages.length === 0 && <div className="welcome"><div className="welcome-icon"><Sparkles size={22} /></div><div className="eyebrow">YOUR AI KNOWLEDGE ASSISTANT</div><h2>What would you like to know?</h2><p>Ask a question about the documents in your workspace. ContextOS will find relevant passages and show you exactly where the answer comes from.</p><div className="suggestions"><button onClick={() => setQuestion('What are the key policies in the uploaded documents?')}>Summarize our key policies <span>↗</span></button><button onClick={() => setQuestion('What process should new team members follow?')}>How do our processes work? <span>↗</span></button></div></div>}
+          <div className="message-thread">{messages.map(message => {
+            const metadata = message.metadata || {};
+            const citations = metadata.citations || [];
+            return message.role === 'USER' ? <div className="message user-message" key={message.id}><div className="message-bubble">{message.content}</div></div> : <article className="response" key={message.id}>
+              <div className="response-head"><span className="assistant-mark"><Sparkles size={15} /></span><strong>ContextOS</strong>{citations.length > 0 && <span className="verified"><ShieldCheck size={13} /> Source checked</span>}</div>
+              <p className="answer-text">{message.content}</p>
+              <div className="answer-meta">{metadata.model}{metadata.latencyMs !== undefined && ` · ${metadata.latencyMs} ms`}{metadata.usage && ` · ${metadata.usage.inputTokens ?? 0} in / ${metadata.usage.outputTokens ?? 0} out tokens`}</div>
+              {citations.length > 0 && <div className="citation-list"><div className="citation-title">SOURCES <span>{citations.length}</span></div>{citations.map(citation => <article className="citation" key={citation.chunkId}><div className="file-icon">▤</div><div><strong>{citation.filename}</strong><small>{citation.page ? `Page ${citation.page} · ` : ''}Source passage</small><p>“{citation.quote}”</p></div></article>)}</div>}
+              <div className="feedback-actions"><span>Was this helpful?</span><button className={message.rating === 5 ? 'rated' : ''} aria-label="Helpful" onClick={() => rateMessage(message.id, 5)}><ThumbsUp size={14} /></button><button className={message.rating === 1 ? 'rated' : ''} aria-label="Not helpful" onClick={() => rateMessage(message.id, 1)}><ThumbsDown size={14} /></button></div>
+            </article>;
+          })}{busy && <div className="response searching"><div className="response-head"><span className="assistant-mark"><Sparkles size={15} /></span><strong>ContextOS</strong></div><p>Searching your workspace…</p></div>}</div>
           <form className="composer" onSubmit={ask}><textarea value={question} onChange={event => setQuestion(event.target.value)} placeholder="Ask anything about your team’s knowledge…" rows={2} /><div className="composer-bottom"><span><ShieldCheck size={14} /> Answers are scoped to your workspace</span><button disabled={busy || !question.trim()} aria-label="Send question"><Send size={16} /></button></div></form>
         </div>
 

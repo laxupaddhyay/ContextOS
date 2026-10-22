@@ -4,6 +4,8 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.*;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
@@ -27,8 +29,9 @@ public class ApiController {
     private final Path storage;
     private final long maxBytes;
     private final TransactionTemplate transaction;
+    private final ObjectMapper objectMapper;
 
-    public ApiController(JdbcTemplate db, RabbitTemplate rabbit, PlatformTransactionManager transactionManager,
+    public ApiController(JdbcTemplate db, RabbitTemplate rabbit, PlatformTransactionManager transactionManager, ObjectMapper objectMapper,
             @Value("${contextos.ai-base-url}") String aiUrl,
             @Value("${contextos.ai-service-token}") String aiToken,
             @Value("${contextos.storage}") String storage,
@@ -39,6 +42,7 @@ public class ApiController {
         this.ai = RestClient.builder().baseUrl(aiUrl).requestFactory(requestFactory).defaultHeader("X-Service-Token", aiToken).build();
         this.storage = Paths.get(storage).toAbsolutePath().normalize(); this.maxBytes = maxBytes;
         this.transaction = new TransactionTemplate(transactionManager);
+        this.objectMapper = objectMapper;
         Files.createDirectories(this.storage);
     }
 
@@ -133,6 +137,81 @@ public class ApiController {
     public Map<String,Object> ask(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody Map<String,String> body) {
         requireMember(workspace,user(header)); String question=Optional.ofNullable(body.get("question")).orElse("").trim();
         if(question.isBlank()||question.length()>4000) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Question must be 1 to 4000 characters");
+        return generateAnswer(workspace,question);
+    }
+
+    @PostMapping("/workspaces/{workspace}/conversations")
+    public Map<String,Object> createConversation(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody(required=false) Map<String,String> body) {
+        UUID actor=user(header); requireMember(workspace,actor);
+        String title=body==null?"New conversation":Optional.ofNullable(body.get("title")).orElse("New conversation").trim();
+        if(title.isBlank()) title="New conversation";
+        title=title.substring(0,Math.min(title.length(),120));
+        UUID id=UUID.randomUUID();
+        db.update("INSERT INTO conversations(id,workspace_id,created_by,title) VALUES (?,?,?,?)",id,workspace,actor,title);
+        return Map.of("id",id,"title",title);
+    }
+
+    @GetMapping("/workspaces/{workspace}/conversations")
+    public List<Map<String,Object>> conversations(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
+        requireMember(workspace,user(header));
+        return db.queryForList("SELECT c.id,c.title,c.updated_at,(SELECT m.content FROM messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message FROM conversations c WHERE c.workspace_id=? ORDER BY c.updated_at DESC LIMIT 50",workspace);
+    }
+
+    @GetMapping("/conversations/{conversation}/messages")
+    public List<Map<String,Object>> messages(@PathVariable UUID conversation,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
+        UUID actor=user(header), workspace=conversationWorkspace(conversation); requireMember(workspace,actor);
+        return db.query("SELECT m.id,m.role,m.content,m.metadata::text,m.created_at,f.rating FROM messages m LEFT JOIN feedback f ON f.message_id=m.id AND f.user_id=? WHERE m.conversation_id=? ORDER BY m.sequence_no",(rs,n)->{
+            Map<String,Object> message=new LinkedHashMap<>(); message.put("id",rs.getObject("id",UUID.class)); message.put("role",rs.getString("role")); message.put("content",rs.getString("content"));
+            try { message.put("metadata",objectMapper.readValue(rs.getString(4),new TypeReference<Map<String,Object>>(){})); }
+            catch(Exception e) { message.put("metadata",Map.of()); }
+            message.put("createdAt",rs.getTimestamp("created_at").toInstant()); message.put("rating",rs.getObject("rating",Integer.class)); return message;
+        },actor,conversation);
+    }
+
+    @PostMapping("/conversations/{conversation}/messages")
+    public Map<String,Object> askConversation(@PathVariable UUID conversation,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody Map<String,String> body) {
+        UUID actor=user(header), workspace=conversationWorkspace(conversation); requireMember(workspace,actor);
+        String question=Optional.ofNullable(body.get("question")).orElse("").trim();
+        if(question.isBlank()||question.length()>4000) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Question must be 1 to 4000 characters");
+        Map<String,Object> result=generateAnswer(workspace,question);
+        UUID userMessage=UUID.randomUUID(), assistantMessage=UUID.randomUUID();
+        Map<String,Object> metadata=new LinkedHashMap<>(); metadata.put("citations",result.getOrDefault("citations",List.of())); metadata.put("model",result.get("model")); metadata.put("usage",result.get("usage")); metadata.put("latencyMs",result.get("latencyMs"));
+        String metadataJson;
+        try { metadataJson=objectMapper.writeValueAsString(metadata); } catch(Exception e) { throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,"Could not save answer metadata"); }
+        String title=question.substring(0,Math.min(question.length(),80));
+        transaction.executeWithoutResult(status->{
+            db.update("INSERT INTO messages(id,conversation_id,role,content,metadata) VALUES (?,?,'USER',?,'{}'::jsonb)",userMessage,conversation,question);
+            db.update("INSERT INTO messages(id,conversation_id,role,content,metadata) VALUES (?,?,'ASSISTANT',?,?::jsonb)",assistantMessage,conversation,result.get("answer"),metadataJson);
+            db.update("UPDATE conversations SET title=CASE WHEN title='New conversation' THEN ? ELSE title END,updated_at=now() WHERE id=?",title,conversation);
+        });
+        return Map.of("userMessage",Map.of("id",userMessage,"role","USER","content",question),"assistantMessage",Map.of("id",assistantMessage,"role","ASSISTANT","content",result.get("answer"),"metadata",metadata));
+    }
+
+    @PostMapping("/messages/{message}/feedback")
+    public Map<String,Object> feedback(@PathVariable UUID message,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody Map<String,Object> body) {
+        UUID actor=user(header), workspace=messageWorkspace(message); requireMember(workspace,actor);
+        Object rawRating=body.get("rating");
+        if(!(rawRating instanceof Number number)||number.doubleValue()!=number.intValue()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Rating must be an integer from 1 to 5");
+        int rating=number.intValue();
+        if(rating<1||rating>5) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Rating must be an integer from 1 to 5");
+        String comment=Optional.ofNullable(body.get("comment")).map(Object::toString).orElse("").trim();
+        if(comment.length()>1000) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Feedback comment must be at most 1000 characters");
+        db.update("INSERT INTO feedback(id,message_id,user_id,rating,comment) VALUES (?,?,?,?,?) ON CONFLICT(message_id,user_id) DO UPDATE SET rating=EXCLUDED.rating,comment=EXCLUDED.comment,created_at=now()",UUID.randomUUID(),message,actor,rating,comment.isEmpty()?null:comment);
+        return Map.of("saved",true,"rating",rating);
+    }
+
+    private UUID conversationWorkspace(UUID conversation) {
+        var rows=db.query("SELECT workspace_id FROM conversations WHERE id=?",(rs,n)->rs.getObject(1,UUID.class),conversation);
+        if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Conversation not found");
+        return rows.get(0);
+    }
+    private UUID messageWorkspace(UUID message) {
+        var rows=db.query("SELECT c.workspace_id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=? AND m.role='ASSISTANT'",(rs,n)->rs.getObject(1,UUID.class),message);
+        if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Message not found");
+        return rows.get(0);
+    }
+
+    private Map<String,Object> generateAnswer(UUID workspace,String question) {
         // Scope the database query before forwarding any document text to the AI service.
         var chunks=db.query("SELECT c.id,c.document_id,d.filename,c.content,c.page_number FROM document_chunks c JOIN documents d ON d.id=c.document_id WHERE c.workspace_id=? AND d.status='READY' AND to_tsvector('simple',c.content) @@ plainto_tsquery('simple',?) ORDER BY ts_rank(to_tsvector('simple',c.content),plainto_tsquery('simple',?)) DESC,c.chunk_index LIMIT 100",(rs,n)->Map.<String,Object>of("chunkId",rs.getString("id"),"documentId",rs.getString("document_id"),"filename",rs.getString("filename"),"content",rs.getString("content"),"page",rs.getObject("page_number") == null ? 0 : rs.getInt("page_number")),workspace,question,question);
         Map result;

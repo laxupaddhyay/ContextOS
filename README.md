@@ -16,8 +16,8 @@ The demo API uses a development identity header (`X-User-Id`) and creates a defa
 - Workspace-scoped document upload and metadata listing.
 - Async RabbitMQ ingestion messages (opaque document IDs only), signature checks, checksum deduplication, PDF/DOCX/Markdown extraction, page-aware PDF chunks with overlap, bounded retries, stale-job recovery, and visible status.
 - Workspace-scoped PostgreSQL full-text retrieval, AI-side BM25 reranking, bounded model calls, source-ID citation validation, and latency/token metadata when the provider supplies usage.
-- The UI supports upload, failed-job retry, deletion, processing status, and cited answers.
-- Minimal browser UI for upload, status, and asking questions.
+- Persistent conversations with message history, per-answer source metadata, and one feedback rating per user/message.
+- The UI supports upload, failed-job retry, deletion, processing status, cited answers, saved chat history, and answer feedback.
 - PostgreSQL migrations, health endpoints, environment example, architecture/security notes, and a versioned evaluation set starter.
 
 Generation is configurable through `GENERATION_MODEL`. Embeddings are not implemented yet; current retrieval uses PostgreSQL full-text search and BM25. Configure `OPENAI_API_KEY` for hosted generation. Do not claim evaluation quality or production readiness until evaluation and security work is completed.
@@ -37,4 +37,6 @@ evals/                     Versioned starter questions
 
 API: `cd services/api && mvn spring-boot:run` (requires Maven). AI: `cd services/ai && pip install -r requirements.txt && uvicorn app.main:app --reload`. Web: `cd apps/web && npm install && npm run dev`.
 
-Uploads are limited to 20 MiB. File content is stored in the local `uploads` volume. The AI endpoint requires `X-Service-Token`; requests from the API add it automatically. This prototype has no malware scanning, OIDC, Redis rate limiting, or production object storage. Use synthetic, non-sensitive data.
+Run the AI service checks with `cd services/ai && pip install -r requirements-dev.txt && pytest`.
+
+Uploads are limited to 20 MiB. File content and conversation messages are stored in PostgreSQL/the local `uploads` volume. The AI endpoint requires `X-Service-Token`; requests from the API add it automatically. This prototype has no malware scanning, OIDC, Redis rate limiting, or production object storage. Use synthetic, non-sensitive data.

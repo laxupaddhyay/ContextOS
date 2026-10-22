@@ -26,7 +26,7 @@ public class IngestionWorker {
     public void recoverStalledJobs(){
         db.update("UPDATE documents d SET status='FAILED',failure_code='RETRY_LIMIT',updated_at=now() FROM ingestion_jobs j WHERE j.document_id=d.id AND j.attempt_count>=3 AND d.status IN ('QUEUED','PROCESSING') AND d.updated_at < now() - interval '30 minutes'");
         var stale=db.query("SELECT id FROM documents WHERE (status='QUEUED' AND updated_at < now() - interval '30 seconds') OR (status='PROCESSING' AND updated_at < now() - interval '30 minutes') ORDER BY created_at LIMIT 20",(rs,n)->rs.getObject(1,UUID.class));
-        stale.forEach(this::process);
+        stale.forEach(id->process(id.toString()));
     }
     @RabbitListener(queues="contextos.ingestion")
     public void process(String documentId){
@@ -34,7 +34,7 @@ public class IngestionWorker {
         try{id=UUID.fromString(documentId);}catch(Exception e){return;}
         int claimed=db.update("UPDATE documents SET status='PROCESSING',failure_code=NULL,updated_at=now() WHERE id=? AND EXISTS (SELECT 1 FROM ingestion_jobs j WHERE j.document_id=documents.id AND j.attempt_count<3) AND (status IN ('QUEUED','FAILED') OR (status='PROCESSING' AND updated_at < now() - interval '30 minutes'))",id);
         if(claimed==0)return;
-        var rows=db.query("SELECT storage_key,filename,workspace_id FROM documents WHERE id=? AND status='PROCESSING'",(rs,n)->Map.of("key",rs.getString(1),"name",rs.getString(2),"workspace",rs.getObject(3,UUID.class)),id);
+        var rows=db.query("SELECT storage_key,filename,workspace_id FROM documents WHERE id=? AND status='PROCESSING'",(rs,n)->Map.<String,Object>of("key",rs.getString(1),"name",rs.getString(2),"workspace",rs.getObject(3,UUID.class)),id);
         if(rows.isEmpty())return;
         try{
             db.update("UPDATE ingestion_jobs SET status='PROCESSING',attempt_count=attempt_count+1 WHERE document_id=?",id);
