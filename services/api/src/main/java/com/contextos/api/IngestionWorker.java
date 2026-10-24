@@ -13,20 +13,37 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClient;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @Component
 public class IngestionWorker {
     private static final Logger log = LoggerFactory.getLogger(IngestionWorker.class);
-    private final JdbcTemplate db; private final Path storage;
-    public IngestionWorker(JdbcTemplate db,@Value("${contextos.storage}") String storage){this.db=db;this.storage=Paths.get(storage).toAbsolutePath().normalize();}
+    private final JdbcTemplate db; private final Path storage; private final RestClient ai;
+    public IngestionWorker(JdbcTemplate db,@Value("${contextos.storage}") String storage,
+            @Value("${contextos.ai-base-url}") String aiUrl,@Value("${contextos.ai-service-token}") String aiToken){
+        this.db=db;this.storage=Paths.get(storage).toAbsolutePath().normalize();
+        var requestFactory=new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(Duration.ofSeconds(3));requestFactory.setReadTimeout(Duration.ofSeconds(35));
+        this.ai=RestClient.builder().baseUrl(aiUrl).requestFactory(requestFactory).defaultHeader("X-Service-Token",aiToken).build();
+    }
     @Bean Queue ingestionQueue(){return new Queue("contextos.ingestion",true);}
     @Scheduled(fixedDelay=30000)
     public void recoverStalledJobs(){
         db.update("UPDATE documents d SET status='FAILED',failure_code='RETRY_LIMIT',updated_at=now() FROM ingestion_jobs j WHERE j.document_id=d.id AND j.attempt_count>=3 AND d.status IN ('QUEUED','PROCESSING') AND d.updated_at < now() - interval '30 minutes'");
         var stale=db.query("SELECT id FROM documents WHERE (status='QUEUED' AND updated_at < now() - interval '30 seconds') OR (status='PROCESSING' AND updated_at < now() - interval '30 minutes') ORDER BY created_at LIMIT 20",(rs,n)->rs.getObject(1,UUID.class));
         stale.forEach(id->process(id.toString()));
+    }
+    @Scheduled(fixedDelay=60000)
+    public void backfillMissingEmbeddings(){
+        var pending=db.query("SELECT c.id,c.content FROM document_chunks c JOIN documents d ON d.id=c.document_id WHERE d.status='READY' AND c.embedding IS NULL ORDER BY d.created_at,c.chunk_index LIMIT 32",(rs,n)->new MissingEmbedding(rs.getObject("id",UUID.class),rs.getString("content")));
+        if(pending.isEmpty())return;
+        List<List<Double>> vectors=embedTexts(pending.stream().map(MissingEmbedding::content).toList(),null);
+        if(vectors.size()!=pending.size())return;
+        for(int i=0;i<pending.size();i++)db.update("UPDATE document_chunks SET embedding=?::vector WHERE id=? AND embedding IS NULL",vectorLiteral(vectors.get(i)),pending.get(i).id());
     }
     @RabbitListener(queues="contextos.ingestion")
     public void process(String documentId){
@@ -55,9 +72,13 @@ public class IngestionWorker {
                 }
             } else addChunks(chunks,Files.readString(path),null);
             if(chunks.isEmpty())throw new IOException("empty document text");
+            List<List<Double>> embeddings=embedChunks(chunks,id);
             db.update("DELETE FROM document_chunks WHERE document_id=?",id);
             UUID workspace=(UUID)row.get("workspace"); int i=0;
-            for(Chunk chunk:chunks)db.update("INSERT INTO document_chunks(id,document_id,workspace_id,chunk_index,content,page_number) VALUES (?,?,?,?,?,?)",UUID.randomUUID(),id,workspace,i++,chunk.content(),chunk.page());
+            for(Chunk chunk:chunks){
+                String vector=embeddings.size()==chunks.size()?vectorLiteral(embeddings.get(i)):null;
+                db.update("INSERT INTO document_chunks(id,document_id,workspace_id,chunk_index,content,page_number,embedding) VALUES (?,?,?,?,?,?,?::vector)",UUID.randomUUID(),id,workspace,i,chunk.content(),chunk.page(),vector);i++;
+            }
             db.update("UPDATE documents SET status='READY',updated_at=now() WHERE id=?",id);
             db.update("UPDATE ingestion_jobs SET status='SUCCEEDED' WHERE document_id=?",id);
         }catch(Exception e){
@@ -67,6 +88,28 @@ public class IngestionWorker {
         }
     }
     private record Chunk(String content,Integer page){}
+    private record MissingEmbedding(UUID id,String content){}
+    private List<List<Double>> embedChunks(List<Chunk> chunks,UUID documentId){
+        return embedTexts(chunks.stream().map(Chunk::content).toList(),documentId);
+    }
+    @SuppressWarnings("unchecked")
+    private List<List<Double>> embedTexts(List<String> texts,UUID documentId){
+        List<List<Double>> vectors=new ArrayList<>();
+        try{
+            for(int start=0;start<texts.size();start+=32){
+                List<String> batchTexts=texts.subList(start,Math.min(start+32,texts.size()));
+                Map<String,Object> response=ai.post().uri("/embed").body(Map.of("texts",batchTexts)).retrieve().body(Map.class);
+                List<List<Double>> batch=response==null?List.of():(List<List<Double>>)response.getOrDefault("embeddings",List.of());
+                if(batch.size()!=batchTexts.size())return List.of();
+                for(List<Double> vector:batch){if(vector.size()!=1536)throw new IllegalStateException("Unexpected embedding dimensions");vectors.add(vector);}
+            }
+            return vectors;
+        }catch(RuntimeException e){
+            if(documentId!=null)log.warn("Embedding unavailable; indexing document {} with full-text retrieval only ({})",documentId,e.getClass().getSimpleName());
+            return List.of();
+        }
+    }
+    private String vectorLiteral(List<Double> vector){return "["+String.join(",",vector.stream().map(String::valueOf).toList())+"]";}
     private void addChunks(List<Chunk> chunks,String raw,Integer page){
         String text=raw.replaceAll("[\\t ]+"," ").replaceAll("\\n{3,}","\n\n").trim();
         int max=2400, overlap=240;

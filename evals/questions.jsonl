@@ -1,1 +1,6 @@
-{"id":"demo-001","question":"What does the source say about the policy?","expected_document_ids":[],"expected_passage_ids":[],"notes":"Replace with a labeled question over approved synthetic demo content."}
+{"id":"onboarding-01","question":"Where can new employees find their first week checklist?","expected_document_ids":["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],"expected_passage_ids":["10000000-0000-0000-0000-000000000001"]}
+{"id":"security-01","question":"How quickly must a lost laptop be reported?","expected_document_ids":["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],"expected_passage_ids":["20000000-0000-0000-0000-000000000001"]}
+{"id":"expenses-01","question":"What is the maximum meal reimbursement per day?","expected_document_ids":["cccccccc-cccc-cccc-cccc-cccccccccccc"],"expected_passage_ids":["30000000-0000-0000-0000-000000000001"]}
+{"id":"leave-01","question":"How far ahead should vacation time be requested?","expected_document_ids":["dddddddd-dddd-dddd-dddd-dddddddddddd"],"expected_passage_ids":["40000000-0000-0000-0000-000000000001"]}
+{"id":"incidents-01","question":"Who should be contacted when a production service is down?","expected_document_ids":["eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"],"expected_passage_ids":["50000000-0000-0000-0000-000000000001"]}
+{"id":"retention-01","question":"When are archived support tickets removed?","expected_document_ids":["ffffffff-ffff-ffff-ffff-ffffffffffff"],"expected_passage_ids":["60000000-0000-0000-0000-000000000001"]}

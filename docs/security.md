@@ -10,3 +10,4 @@
 - The local Compose ports and default database password are development-only. Use TLS, secrets management, least-privilege credentials, malware scanning, private AI networking, and a retention policy before handling real company data.
 - Deletion removes the local source file and deletes the document row; database cascade removes chunks/jobs. No cache is currently used.
 - Raw question and document text are not written to application logs by these services, but questions and answers are persisted as conversation history. Provider retention and data handling depend on the configured provider and account settings.
+- When `OPENAI_API_KEY` is configured, document chunks and questions are sent to the configured embedding model as well as the generation provider. Review provider data handling before indexing sensitive documents. Embeddings are workspace-filtered in SQL before passages are sent to the AI answer endpoint.

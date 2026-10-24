@@ -18,6 +18,7 @@ class Passage(BaseModel):
     filename: str = Field(max_length=512)
     content: str = Field(max_length=10000)
     page: int | None = None
+    retrievalScore: float = 0.0
 
 
 class AnswerRequest(BaseModel):
@@ -25,12 +26,18 @@ class AnswerRequest(BaseModel):
     passages: list[Passage] = Field(max_length=100)
 
 
+class EmbeddingRequest(BaseModel):
+    texts: list[str] = Field(min_length=1, max_length=32)
+
+
 def rank(question: str, passages: list[Passage]) -> list[Passage]:
     stop_words = {"about", "after", "again", "also", "and", "are", "could", "does", "from", "have", "into", "more", "that", "the", "their", "this", "what", "when", "where", "which", "with", "would"}
     query_terms = [term for term in re.findall(r"[\w'-]{3,}", question.lower()) if term not in stop_words]
     query = Counter(query_terms)
-    if not query or not passages:
+    if not passages:
         return []
+    if not query:
+        return passages[:6]
     tokenized = [re.findall(r"[\w'-]{3,}", passage.content.lower()) for passage in passages]
     document_frequency = Counter(term for terms in tokenized for term in set(terms))
     average_length = sum(map(len, tokenized)) / len(tokenized)
@@ -47,12 +54,47 @@ def rank(question: str, passages: list[Passage]) -> list[Passage]:
             score += idf * (frequency * 2.2 / denominator) * min(query_frequency, 2)
         if score > 0:
             scored.append((score, passage))
-    return [passage for _, passage in sorted(scored, key=lambda item: item[0], reverse=True)[:6]]
+    if not scored:
+        # Keep semantically retrieved candidates when none shares literal query terms.
+        return passages[:6]
+    max_lexical = max(score for score, _ in scored)
+    max_retrieval = max((passage.retrievalScore for passage in passages), default=0.0)
+    combined = []
+    lexical_scores = {passage.chunkId: score for score, passage in scored}
+    for passage in passages:
+        lexical_score = lexical_scores.get(passage.chunkId, 0.0) / max_lexical
+        retrieval_score = passage.retrievalScore / max_retrieval if max_retrieval > 0 else 0.0
+        if lexical_score or retrieval_score:
+            combined.append((lexical_score + retrieval_score, passage))
+    return [passage for _, passage in sorted(combined, key=lambda item: item[0], reverse=True)[:6]]
+
+
+def create_embeddings(texts: list[str]) -> list[list[float]]:
+    key = os.getenv("OPENAI_API_KEY", "")
+    if not key:
+        return []
+    from openai import OpenAI
+    model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    client = OpenAI(api_key=key, timeout=30.0, max_retries=1)
+    result = client.embeddings.create(model=model, input=texts, dimensions=1536)
+    return [item.embedding for item in sorted(result.data, key=lambda item: item.index)]
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/embed")
+def embed(request: EmbeddingRequest, service_token: str | None = Header(default=None, alias="X-Service-Token")) -> dict[str, Any]:
+    expected_token = os.getenv("AI_SERVICE_TOKEN", "dev-only-change-me")
+    if not service_token or not hmac.compare_digest(service_token, expected_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        vectors = create_embeddings(request.texts)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Embedding provider is unavailable")
+    return {"embeddings": vectors, "model": os.getenv("EMBEDDING_MODEL", "text-embedding-3-small") if vectors else "unavailable"}
 
 
 @app.post("/answer")

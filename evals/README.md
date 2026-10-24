@@ -1,5 +1,5 @@
 # Evaluation dataset
 
-Add versioned, synthetic or explicitly approved non-sensitive question records to `questions.jsonl`. Each row should include a stable ID, question, expected document IDs, and expected passage IDs. Never commit private documents, credentials, or user questions from production.
+`corpus.jsonl` and `questions.jsonl` contain a small synthetic labeled set with stable document and passage IDs. Keep additions synthetic or explicitly approved and non-sensitive. Never commit private documents, credentials, or user questions from production.
 
-The current file is a schema/example starter, not a scored dataset. There are no published Recall@K, MRR, faithfulness, or latency results yet. For service-level unit checks, run `cd services/ai && pip install -r requirements-dev.txt && pytest`; those checks do not replace a labeled retrieval evaluation.
+Run `cd services/ai && pip install -r requirements-dev.txt && python evaluate_retrieval.py` to compare BM25 lexical ranking with a local reciprocal-rank-fusion proxy. The hybrid score uses the configured embedding provider and requires `OPENAI_API_KEY`; lexical metrics run without it. The script reports Recall@5 and MRR on this synthetic corpus only. It does not exercise PostgreSQL authorization filters, production data, answer faithfulness, or end-to-end latency, so its values are development signals rather than product claims.

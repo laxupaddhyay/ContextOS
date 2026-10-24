@@ -5,7 +5,7 @@ ContextOS is a secure, workspace-scoped knowledge assistant prototype. This repo
 ## Start locally
 
 1. Install Docker Desktop with Compose.
-2. Copy `.env.example` to `.env`, replace `AI_SERVICE_TOKEN` with a long random value, and set `OPENAI_API_KEY` if you want generated answers. Without a key, the AI service uses a local deterministic fallback suitable for smoke demos; results are not benchmark quality.
+2. Copy `.env.example` to `.env`, replace `AI_SERVICE_TOKEN` with a long random value, and set `OPENAI_API_KEY` to enable generated answers and semantic embeddings. Without a key, the app falls back to workspace-scoped full-text retrieval; semantic search is backfilled automatically after a key is added and services are restarted.
 3. Run `docker compose -f infra/compose.yaml up --build`.
 4. Open http://localhost:5173. API health: http://localhost:8080/actuator/health; AI health: http://localhost:8000/health.
 
@@ -15,12 +15,12 @@ The demo API uses a development identity header (`X-User-Id`) and creates a defa
 
 - Workspace-scoped document upload and metadata listing.
 - Async RabbitMQ ingestion messages (opaque document IDs only), signature checks, checksum deduplication, PDF/DOCX/Markdown extraction, page-aware PDF chunks with overlap, bounded retries, stale-job recovery, and visible status.
-- Workspace-scoped PostgreSQL full-text retrieval, AI-side BM25 reranking, bounded model calls, source-ID citation validation, and latency/token metadata when the provider supplies usage.
+- Workspace-scoped hybrid PostgreSQL full-text and pgvector retrieval, AI-side reranking, bounded model calls, source-ID citation validation, and latency/token metadata when the provider supplies usage.
 - Persistent conversations with message history, per-answer source metadata, and one feedback rating per user/message.
 - The UI supports upload, failed-job retry, deletion, processing status, cited answers, saved chat history, and answer feedback.
 - PostgreSQL migrations, health endpoints, environment example, architecture/security notes, and a versioned evaluation set starter.
 
-Generation is configurable through `GENERATION_MODEL`. Embeddings are not implemented yet; current retrieval uses PostgreSQL full-text search and BM25. Configure `OPENAI_API_KEY` for hosted generation. Do not claim evaluation quality or production readiness until evaluation and security work is completed.
+Generation is configurable through `GENERATION_MODEL`; embeddings use `EMBEDDING_MODEL` (default `text-embedding-3-small`, 1536 dimensions). Embeddings are optional: unavailable embedding calls leave chunks searchable through PostgreSQL full-text search. Existing chunks without vectors are backfilled by the ingestion worker once embeddings are available. Run the synthetic retrieval comparison with `cd services/ai && pip install -r requirements-dev.txt && python evaluate_retrieval.py`; the hybrid score requires `OPENAI_API_KEY` and is a proxy benchmark, not a production quality claim. Do not claim evaluation quality or production readiness until evaluation and security work is completed.
 
 ## Repository layout
 

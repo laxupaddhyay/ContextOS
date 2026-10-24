@@ -213,11 +213,32 @@ public class ApiController {
 
     private Map<String,Object> generateAnswer(UUID workspace,String question) {
         // Scope the database query before forwarding any document text to the AI service.
-        var chunks=db.query("SELECT c.id,c.document_id,d.filename,c.content,c.page_number FROM document_chunks c JOIN documents d ON d.id=c.document_id WHERE c.workspace_id=? AND d.status='READY' AND to_tsvector('simple',c.content) @@ plainto_tsquery('simple',?) ORDER BY ts_rank(to_tsvector('simple',c.content),plainto_tsquery('simple',?)) DESC,c.chunk_index LIMIT 100",(rs,n)->Map.<String,Object>of("chunkId",rs.getString("id"),"documentId",rs.getString("document_id"),"filename",rs.getString("filename"),"content",rs.getString("content"),"page",rs.getObject("page_number") == null ? 0 : rs.getInt("page_number")),workspace,question,question);
+        List<Double> queryVector=queryEmbedding(question);
+        List<Map<String,Object>> chunks;
+        if(queryVector.size()==1536){
+            String vector=vectorLiteral(queryVector);
+            chunks=db.query("WITH lexical_scored AS (SELECT c.id,ts_rank(to_tsvector('simple',c.content),plainto_tsquery('simple',?)) AS score FROM document_chunks c JOIN documents d ON d.id=c.document_id WHERE c.workspace_id=? AND d.status='READY' AND to_tsvector('simple',c.content) @@ plainto_tsquery('simple',?)), lexical AS (SELECT id,row_number() OVER (ORDER BY score DESC) AS rank FROM lexical_scored ORDER BY score DESC LIMIT 80), semantic_scored AS (SELECT c.id,c.embedding <=> ?::vector AS distance FROM document_chunks c JOIN documents d ON d.id=c.document_id WHERE c.workspace_id=? AND d.status='READY' AND c.embedding IS NOT NULL ORDER BY c.embedding <=> ?::vector LIMIT 80), semantic AS (SELECT id,row_number() OVER (ORDER BY distance) AS rank FROM semantic_scored) SELECT c.id,c.document_id,d.filename,c.content,c.page_number,(COALESCE(1.0/(60+lexical.rank),0)+COALESCE(1.0/(60+semantic.rank),0)) AS retrieval_score FROM document_chunks c JOIN documents d ON d.id=c.document_id LEFT JOIN lexical ON lexical.id=c.id LEFT JOIN semantic ON semantic.id=c.id WHERE c.workspace_id=? AND d.status='READY' AND (lexical.id IS NOT NULL OR semantic.id IS NOT NULL) ORDER BY retrieval_score DESC,c.chunk_index LIMIT 100",(rs,n)->Map.<String,Object>of("chunkId",rs.getString("id"),"documentId",rs.getString("document_id"),"filename",rs.getString("filename"),"content",rs.getString("content"),"page",rs.getObject("page_number")==null?0:rs.getInt("page_number"),"retrievalScore",rs.getDouble("retrieval_score")),question,workspace,question,vector,workspace,vector,workspace);
+        } else {
+            chunks=db.query("SELECT c.id,c.document_id,d.filename,c.content,c.page_number FROM document_chunks c JOIN documents d ON d.id=c.document_id WHERE c.workspace_id=? AND d.status='READY' AND to_tsvector('simple',c.content) @@ plainto_tsquery('simple',?) ORDER BY ts_rank(to_tsvector('simple',c.content),plainto_tsquery('simple',?)) DESC,c.chunk_index LIMIT 100",(rs,n)->Map.<String,Object>of("chunkId",rs.getString("id"),"documentId",rs.getString("document_id"),"filename",rs.getString("filename"),"content",rs.getString("content"),"page",rs.getObject("page_number") == null ? 0 : rs.getInt("page_number"),"retrievalScore",0.0),workspace,question,question);
+        }
         Map result;
         try { result=ai.post().uri("/answer").contentType(MediaType.APPLICATION_JSON).body(Map.of("question",question,"passages",chunks)).retrieve().body(Map.class); }
         catch(RestClientException e) { throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"AI service is unavailable"); }
         if(result==null) throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"AI service returned no answer");
         return result;
     }
+
+    @SuppressWarnings("unchecked")
+    private List<Double> queryEmbedding(String question){
+        try{
+            Map<String,Object> response=ai.post().uri("/embed").body(Map.of("texts",List.of(question))).retrieve().body(Map.class);
+            if(response==null)return List.of();
+            Object raw=response.get("embeddings");
+            if(!(raw instanceof List<?> rows)||rows.isEmpty()||!(rows.get(0) instanceof List<?> values))return List.of();
+            List<Double> vector=new ArrayList<>();
+            for(Object value:values){if(!(value instanceof Number number))return List.of();vector.add(number.doubleValue());}
+            return vector.size()==1536?vector:List.of();
+        }catch(RestClientException e){return List.of();}
+    }
+    private String vectorLiteral(List<Double> vector){return "["+String.join(",",vector.stream().map(String::valueOf).toList())+"]";}
 }
