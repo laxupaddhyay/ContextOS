@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-contextos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-local}
     ports: ["127.0.0.1:5432:5432"]
-    volumes: ["pgdata:/var/lib/postgresql/data", "../services/api/src/main/resources/db/migration/V1__init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro", "../services/api/src/main/resources/db/migration/V2__chunk_embeddings.sql:/docker-entrypoint-initdb.d/02-chunk-embeddings.sql:ro"]
+    volumes: ["pgdata:/var/lib/postgresql/data", "../services/api/src/main/resources/db/migration/V1__init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro", "../services/api/src/main/resources/db/migration/V2__chunk_embeddings.sql:/docker-entrypoint-initdb.d/02-chunk-embeddings.sql:ro", "../services/api/src/main/resources/db/migration/V3__oidc_identities.sql:/docker-entrypoint-initdb.d/03-oidc-identities.sql:ro"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-contextos} -d ${POSTGRES_DB:-contextos}"]
       interval: 5s
@@ -34,6 +34,10 @@ services:
       RABBITMQ_HOST: rabbitmq
       FILE_STORAGE_PATH: /data/uploads
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-20971520}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+      OIDC_ISSUER_URI: ${OIDC_ISSUER_URI:-}
+      OIDC_API_AUDIENCE: ${OIDC_API_AUDIENCE:-}
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-http://localhost:5173}
     ports: ["127.0.0.1:8080:8080"]
     volumes: ["uploads:/data/uploads"]
     depends_on:
@@ -42,6 +46,12 @@ services:
       ai: { condition: service_started }
   web:
     build: ../apps/web
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080/api/v1}
+      VITE_AUTH_MODE: ${VITE_AUTH_MODE:-local}
+      VITE_OIDC_AUTHORITY: ${VITE_OIDC_AUTHORITY:-}
+      VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-}
+      VITE_OIDC_SCOPE: ${VITE_OIDC_SCOPE:-openid profile email}
     ports: ["127.0.0.1:5173:5173"]
     depends_on: [api]
 volumes:

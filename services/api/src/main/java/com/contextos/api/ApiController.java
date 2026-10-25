@@ -18,10 +18,12 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
 
 @RestController
 @RequestMapping("/api/v1")
-@CrossOrigin(origins = "http://localhost:5173")
 public class ApiController {
     private final JdbcTemplate db;
     private final RabbitTemplate rabbit;
@@ -30,8 +32,9 @@ public class ApiController {
     private final long maxBytes;
     private final TransactionTemplate transaction;
     private final ObjectMapper objectMapper;
+    private final IdentityService identities;
 
-    public ApiController(JdbcTemplate db, RabbitTemplate rabbit, PlatformTransactionManager transactionManager, ObjectMapper objectMapper,
+    public ApiController(JdbcTemplate db, RabbitTemplate rabbit, PlatformTransactionManager transactionManager, ObjectMapper objectMapper, IdentityService identities,
             @Value("${contextos.ai-base-url}") String aiUrl,
             @Value("${contextos.ai-service-token}") String aiToken,
             @Value("${contextos.storage}") String storage,
@@ -43,14 +46,25 @@ public class ApiController {
         this.storage = Paths.get(storage).toAbsolutePath().normalize(); this.maxBytes = maxBytes;
         this.transaction = new TransactionTemplate(transactionManager);
         this.objectMapper = objectMapper;
+        this.identities = identities;
         Files.createDirectories(this.storage);
     }
 
-    private UUID user(String userId) {
-        UUID id;
-        try { id = UUID.fromString(userId); } catch (Exception e) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "X-User-Id must be a UUID"); }
-        db.update("INSERT INTO users(id,email,display_name) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING", id, id + "@local.test", "Demo user");
-        return id;
+    private UUID user() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        if (authentication.getPrincipal() instanceof Jwt jwt) {
+            String displayName = Optional.ofNullable(jwt.getClaimAsString("name"))
+                    .orElse(jwt.getClaimAsString("preferred_username"));
+            return identities.resolveOidc(jwt.getIssuer().toString(), jwt.getSubject(), displayName);
+        }
+        try {
+            return identities.resolveLocal(UUID.fromString(authentication.getName()));
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid authenticated identity");
+        }
     }
     private void requireMember(UUID workspace, UUID user) {
         Integer n = db.queryForObject("SELECT count(*) FROM workspace_members WHERE workspace_id=? AND user_id=?", Integer.class, workspace, user);
@@ -58,8 +72,8 @@ public class ApiController {
     }
 
     @PostMapping("/workspaces")
-    public Map<String,Object> createWorkspace(@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header, @RequestBody Map<String,String> body) {
-        UUID u=user(header), w=UUID.randomUUID(); String name=Optional.ofNullable(body.get("name")).orElse("My workspace").trim();
+    public Map<String,Object> createWorkspace( @RequestBody Map<String,String> body) {
+        UUID u=user(), w=UUID.randomUUID(); String name=Optional.ofNullable(body.get("name")).orElse("My workspace").trim();
         if (name.isBlank() || name.length()>120) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Workspace name is required (max 120 characters)");
         db.update("INSERT INTO workspaces(id,name,created_by) VALUES (?,?,?)",w,name,u);
         db.update("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES (?,?, 'ADMIN')",w,u);
@@ -67,13 +81,13 @@ public class ApiController {
     }
 
     @GetMapping("/workspaces")
-    public List<Map<String,Object>> workspaces(@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
-        return db.queryForList("SELECT w.id,w.name,m.role FROM workspaces w JOIN workspace_members m ON m.workspace_id=w.id WHERE m.user_id=? ORDER BY w.created_at",user(header));
+    public List<Map<String,Object>> workspaces() {
+        return db.queryForList("SELECT w.id,w.name,m.role FROM workspaces w JOIN workspace_members m ON m.workspace_id=w.id WHERE m.user_id=? ORDER BY w.created_at",user());
     }
 
     @PostMapping(value="/workspaces/{workspace}/documents", consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Map<String,Object> upload(@PathVariable UUID workspace, @RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header, @RequestPart("file") MultipartFile file) throws Exception {
-        UUID u=user(header); requireMember(workspace,u);
+    public Map<String,Object> upload(@PathVariable UUID workspace,  @RequestPart("file") MultipartFile file) throws Exception {
+        UUID u=user(); requireMember(workspace,u);
         if (file.isEmpty() || file.getSize()>maxBytes) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,"File is empty or exceeds upload limit");
         String original=Paths.get(Optional.ofNullable(file.getOriginalFilename()).orElse("upload.md")).getFileName().toString();
         String lower=original.toLowerCase(Locale.ROOT);
@@ -101,14 +115,14 @@ public class ApiController {
     }
 
     @GetMapping("/workspaces/{workspace}/documents")
-    public List<Map<String,Object>> documents(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
-        requireMember(workspace,user(header));
+    public List<Map<String,Object>> documents(@PathVariable UUID workspace) {
+        requireMember(workspace,user());
         return db.queryForList("SELECT id,filename,status,created_at,failure_code FROM documents WHERE workspace_id=? ORDER BY created_at DESC",workspace);
     }
 
     @DeleteMapping("/documents/{id}")
-    public Map<String,Object> delete(@PathVariable UUID id,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
-        UUID u=user(header);
+    public Map<String,Object> delete(@PathVariable UUID id) {
+        UUID u=user();
         var rows=db.query("SELECT workspace_id,storage_key FROM documents WHERE id=?",(rs,n)->Map.of("workspace",rs.getObject(1,UUID.class),"key",rs.getString(2)),id);
         if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         UUID workspace=(UUID)rows.get(0).get("workspace"); requireMember(workspace,u);
@@ -119,8 +133,8 @@ public class ApiController {
     }
 
     @PostMapping("/documents/{id}/retry")
-    public Map<String,Object> retry(@PathVariable UUID id,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
-        UUID u=user(header);
+    public Map<String,Object> retry(@PathVariable UUID id) {
+        UUID u=user();
         var rows=db.query("SELECT d.workspace_id,d.status,j.attempt_count FROM documents d JOIN ingestion_jobs j ON j.document_id=d.id WHERE d.id=?",(rs,n)->Map.of("workspace",rs.getObject(1,UUID.class),"status",rs.getString(2),"attempts",rs.getInt(3)),id);
         if(rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         requireMember((UUID)rows.get(0).get("workspace"),u);
@@ -134,15 +148,15 @@ public class ApiController {
     }
 
     @PostMapping("/workspaces/{workspace}/ask")
-    public Map<String,Object> ask(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody Map<String,String> body) {
-        requireMember(workspace,user(header)); String question=Optional.ofNullable(body.get("question")).orElse("").trim();
+    public Map<String,Object> ask(@PathVariable UUID workspace,@RequestBody Map<String,String> body) {
+        requireMember(workspace,user()); String question=Optional.ofNullable(body.get("question")).orElse("").trim();
         if(question.isBlank()||question.length()>4000) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Question must be 1 to 4000 characters");
         return generateAnswer(workspace,question);
     }
 
     @PostMapping("/workspaces/{workspace}/conversations")
-    public Map<String,Object> createConversation(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody(required=false) Map<String,String> body) {
-        UUID actor=user(header); requireMember(workspace,actor);
+    public Map<String,Object> createConversation(@PathVariable UUID workspace,@RequestBody(required=false) Map<String,String> body) {
+        UUID actor=user(); requireMember(workspace,actor);
         String title=body==null?"New conversation":Optional.ofNullable(body.get("title")).orElse("New conversation").trim();
         if(title.isBlank()) title="New conversation";
         title=title.substring(0,Math.min(title.length(),120));
@@ -152,14 +166,14 @@ public class ApiController {
     }
 
     @GetMapping("/workspaces/{workspace}/conversations")
-    public List<Map<String,Object>> conversations(@PathVariable UUID workspace,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
-        requireMember(workspace,user(header));
+    public List<Map<String,Object>> conversations(@PathVariable UUID workspace) {
+        requireMember(workspace,user());
         return db.queryForList("SELECT c.id,c.title,c.updated_at,(SELECT m.content FROM messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message FROM conversations c WHERE c.workspace_id=? ORDER BY c.updated_at DESC LIMIT 50",workspace);
     }
 
     @GetMapping("/conversations/{conversation}/messages")
-    public List<Map<String,Object>> messages(@PathVariable UUID conversation,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header) {
-        UUID actor=user(header), workspace=conversationWorkspace(conversation); requireMember(workspace,actor);
+    public List<Map<String,Object>> messages(@PathVariable UUID conversation) {
+        UUID actor=user(), workspace=conversationWorkspace(conversation); requireMember(workspace,actor);
         return db.query("SELECT m.id,m.role,m.content,m.metadata::text,m.created_at,f.rating FROM messages m LEFT JOIN feedback f ON f.message_id=m.id AND f.user_id=? WHERE m.conversation_id=? ORDER BY m.sequence_no",(rs,n)->{
             Map<String,Object> message=new LinkedHashMap<>(); message.put("id",rs.getObject("id",UUID.class)); message.put("role",rs.getString("role")); message.put("content",rs.getString("content"));
             try { message.put("metadata",objectMapper.readValue(rs.getString(4),new TypeReference<Map<String,Object>>(){})); }
@@ -169,8 +183,8 @@ public class ApiController {
     }
 
     @PostMapping("/conversations/{conversation}/messages")
-    public Map<String,Object> askConversation(@PathVariable UUID conversation,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody Map<String,String> body) {
-        UUID actor=user(header), workspace=conversationWorkspace(conversation); requireMember(workspace,actor);
+    public Map<String,Object> askConversation(@PathVariable UUID conversation,@RequestBody Map<String,String> body) {
+        UUID actor=user(), workspace=conversationWorkspace(conversation); requireMember(workspace,actor);
         String question=Optional.ofNullable(body.get("question")).orElse("").trim();
         if(question.isBlank()||question.length()>4000) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Question must be 1 to 4000 characters");
         Map<String,Object> result=generateAnswer(workspace,question);
@@ -188,8 +202,8 @@ public class ApiController {
     }
 
     @PostMapping("/messages/{message}/feedback")
-    public Map<String,Object> feedback(@PathVariable UUID message,@RequestHeader(value="X-User-Id", defaultValue="00000000-0000-0000-0000-000000000001") String header,@RequestBody Map<String,Object> body) {
-        UUID actor=user(header), workspace=messageWorkspace(message); requireMember(workspace,actor);
+    public Map<String,Object> feedback(@PathVariable UUID message,@RequestBody Map<String,Object> body) {
+        UUID actor=user(), workspace=messageWorkspace(message); requireMember(workspace,actor);
         Object rawRating=body.get("rating");
         if(!(rawRating instanceof Number number)||number.doubleValue()!=number.intValue()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Rating must be an integer from 1 to 5");
         int rating=number.intValue();

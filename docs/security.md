@@ -1,8 +1,10 @@
 # Security notes
 
-- Local identity is a fixed development UUID supplied through `X-User-Id`; it is not authentication. Replace it with verified OIDC subject claims before deployment.
+- Outside the `local` Spring profile, every API endpoint requires a signed OIDC access token. The API validates issuer, timestamps, and the configured audience, then maps issuer plus subject to an internal user ID. The `X-User-Id` demo identity filter only exists in the explicitly selected `local` profile; never expose that profile to the public internet.
+- The browser uses authorization code flow with PKCE and keeps tokens in session storage. Configure the provider's redirect URI, API audience, API scope, issuer, and exact frontend origin as described in [authentication setup](authentication.md). Do not put a client secret in the browser.
+- Email is not used to link OIDC identities. A change of issuer or subject creates a separate internal account; account linking needs a deliberate verified process.
 - The AI `/answer` endpoint requires `X-Service-Token`, which the API adds from `AI_SERVICE_TOKEN`. Set a unique random value in `.env`; the built-in fallback token is public and local-development-only.
-- Browser CORS is restricted to the local Vite origin. Configure the exact trusted frontend origin before deployment.
+- Browser CORS is restricted to `CORS_ALLOWED_ORIGIN`. Configure the exact trusted frontend origin before deployment.
 - Membership is checked server-side. Unknown workspace and non-member responses do not disclose whether a workspace exists.
 - Conversation history, questions, answers, citation snippets, and feedback are stored in the database. Define retention and deletion behavior before using sensitive data; the current document deletion endpoint does not delete conversation history.
 - Document text is treated as untrusted data in the AI system prompt. No tools are exposed to the model.

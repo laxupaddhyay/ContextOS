@@ -9,7 +9,7 @@ ContextOS is a secure, workspace-scoped knowledge assistant prototype. This repo
 3. Run `docker compose -f infra/compose.yaml up --build`.
 4. Open http://localhost:5173. API health: http://localhost:8080/actuator/health; AI health: http://localhost:8000/health.
 
-The demo API uses a development identity header (`X-User-Id`) and creates a default workspace for that user. Replace this with OIDC before deployment. The AI service requires the shared `AI_SERVICE_TOKEN`; the default token is for local use only. Workspace and document authorization are enforced server-side. Never expose this development setup to the public internet.
+Docker Compose defaults to the `local` profile for the demo identity. For OIDC setup and deployment configuration, see [docs/authentication.md](docs/authentication.md). The API validates the OIDC issuer, access token time claims, and audience outside the local profile. The AI service requires the shared `AI_SERVICE_TOKEN`; the default token is for local use only. Workspace and document authorization are enforced server-side. Never expose the local demo profile to the public internet.
 
 ## Current MVP slice
 
@@ -18,7 +18,7 @@ The demo API uses a development identity header (`X-User-Id`) and creates a defa
 - Workspace-scoped hybrid PostgreSQL full-text and pgvector retrieval, AI-side reranking, bounded model calls, source-ID citation validation, and latency/token metadata when the provider supplies usage.
 - Persistent conversations with message history, per-answer source metadata, and one feedback rating per user/message.
 - The UI supports upload, failed-job retry, deletion, processing status, cited answers, saved chat history, and answer feedback.
-- PostgreSQL migrations, health endpoints, environment example, architecture/security notes, and a versioned evaluation set starter.
+- PostgreSQL migrations, health endpoints, environment example, authentication/architecture/security notes, and a versioned synthetic retrieval evaluation set.
 
 Generation is configurable through `GENERATION_MODEL`; embeddings use `EMBEDDING_MODEL` (default `text-embedding-3-small`, 1536 dimensions). Embeddings are optional: unavailable embedding calls leave chunks searchable through PostgreSQL full-text search. Existing chunks without vectors are backfilled by the ingestion worker once embeddings are available. Run the synthetic retrieval comparison with `cd services/ai && pip install -r requirements-dev.txt && python evaluate_retrieval.py`; the hybrid score requires `OPENAI_API_KEY` and is a proxy benchmark, not a production quality claim. Do not claim evaluation quality or production readiness until evaluation and security work is completed.
 
@@ -35,8 +35,8 @@ evals/                     Versioned starter questions
 
 ## Development
 
-API: `cd services/api && mvn spring-boot:run` (requires Maven). AI: `cd services/ai && pip install -r requirements.txt && uvicorn app.main:app --reload`. Web: `cd apps/web && npm install && npm run dev`.
+API local demo: `cd services/api && mvn spring-boot:run -Dspring-boot.run.profiles=local` (requires Maven). Without the `local` profile, configure OIDC first. AI: `cd services/ai && pip install -r requirements.txt && uvicorn app.main:app --reload`. Web: `cd apps/web && npm install && npm run dev`.
 
 Run the AI service checks with `cd services/ai && pip install -r requirements-dev.txt && pytest`.
 
-Uploads are limited to 20 MiB. File content and conversation messages are stored in PostgreSQL/the local `uploads` volume. The AI endpoint requires `X-Service-Token`; requests from the API add it automatically. This prototype has no malware scanning, OIDC, Redis rate limiting, or production object storage. Use synthetic, non-sensitive data.
+Uploads are limited to 20 MiB. File content and conversation messages are stored in PostgreSQL/the local `uploads` volume. The AI endpoint requires `X-Service-Token`; requests from the API add it automatically. This prototype has no malware scanning, Redis rate limiting, or production object storage. Use synthetic, non-sensitive data.

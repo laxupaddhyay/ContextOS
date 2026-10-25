@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { BookOpen, Files, Plus, Send, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, UploadCloud } from 'lucide-react';
-
-const API = 'http://localhost:8080/api/v1';
-const USER = '00000000-0000-0000-0000-000000000001';
+import { apiFetch, beginSignIn, finishSignIn, isLocalAuth, signOut } from './auth';
+import type { User } from 'oidc-client-ts';
 type Workspace = { id: string; name: string; role: string };
 type Doc = { id: string; filename: string; status: string; failure_code?: string | null };
 type Citation = { documentId: string; filename: string; page: number | null; chunkId: string; quote: string };
@@ -21,17 +20,29 @@ export default function App() {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState<User | null>(null);
   const loadStarted = useRef(false);
   const initializedWorkspace = useRef('');
 
+  useEffect(() => {
+    let active = true;
+    finishSignIn().then(user => {
+      if (active) { setAuthUser(user); setAuthReady(true); setError(''); }
+    }).catch(e => {
+      if (active) { setError(e instanceof Error ? e.message : 'Could not complete sign in.'); setAuthReady(true); }
+    });
+    return () => { active = false; };
+  }, []);
+
   async function load() {
     try {
-      let response = await fetch(`${API}/workspaces`, { headers: { 'X-User-Id': USER } });
+      let response = await apiFetch(`/workspaces`);
       if (!response.ok) throw new Error('Could not load workspaces');
       let items: Workspace[] = await response.json();
       if (!items.length) {
-        response = await fetch(`${API}/workspaces`, {
-          method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' },
+        response = await apiFetch(`/workspaces`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: 'Product Knowledge' }),
         });
         if (!response.ok) throw new Error('Could not create the demo workspace');
@@ -47,14 +58,15 @@ export default function App() {
 
   useEffect(() => {
     // React StrictMode replays effects in development; avoid creating duplicate demo workspaces.
+    if (!authReady || (!isLocalAuth && !authUser)) return;
     if (loadStarted.current) return;
     loadStarted.current = true;
     load();
-  }, []);
+  }, [authReady, authUser]);
 
   useEffect(() => {
     if (!workspace) return;
-    const refresh = () => fetch(`${API}/workspaces/${workspace}/documents`, { headers: { 'X-User-Id': USER } })
+    const refresh = () => apiFetch(`/workspaces/${workspace}/documents`)
       .then(response => response.ok ? response.json() : Promise.reject())
       .then(setDocs).catch(() => {});
     refresh();
@@ -63,7 +75,7 @@ export default function App() {
   }, [workspace]);
 
   async function refreshMessages(id: string) {
-    const response = await fetch(`${API}/conversations/${id}/messages`, { headers: { 'X-User-Id': USER } });
+    const response = await apiFetch(`/conversations/${id}/messages`);
     if (!response.ok) throw new Error('Could not load this conversation');
     const result: ChatMessage[] = await response.json();
     setMessages(result);
@@ -74,11 +86,11 @@ export default function App() {
     initializedWorkspace.current = workspace;
     (async () => {
       try {
-        let response = await fetch(`${API}/workspaces/${workspace}/conversations`, { headers: { 'X-User-Id': USER } });
+        let response = await apiFetch(`/workspaces/${workspace}/conversations`);
         if (!response.ok) throw new Error('Could not load conversations');
         let items: Conversation[] = await response.json();
         if (!items.length) {
-          response = await fetch(`${API}/workspaces/${workspace}/conversations`, { method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+          response = await apiFetch(`/workspaces/${workspace}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
           if (!response.ok) throw new Error('Could not start a conversation');
           items = [await response.json()];
         }
@@ -96,7 +108,7 @@ export default function App() {
   async function newConversation() {
     if (!workspace) return;
     try {
-      const response = await fetch(`${API}/workspaces/${workspace}/conversations`, { method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      const response = await apiFetch(`/workspaces/${workspace}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
       if (!response.ok) throw new Error('Could not start a conversation');
       const created: Conversation = await response.json();
       setConversations(items => [created, ...items]);
@@ -112,8 +124,8 @@ export default function App() {
     const data = new FormData();
     data.append('file', file);
     try {
-      const response = await fetch(`${API}/workspaces/${workspace}/documents`, {
-        method: 'POST', headers: { 'X-User-Id': USER }, body: data,
+      const response = await apiFetch(`/workspaces/${workspace}/documents`, {
+        method: 'POST', body: data,
       });
       if (!response.ok) {
         const result = await response.json();
@@ -130,8 +142,8 @@ export default function App() {
     if (action === 'delete' && !window.confirm('Delete this document and its indexed passages?')) return;
     setError('');
     try {
-      const response = await fetch(`${API}/documents/${id}${action === 'retry' ? '/retry' : ''}`, {
-        method: action === 'retry' ? 'POST' : 'DELETE', headers: { 'X-User-Id': USER },
+      const response = await apiFetch(`/documents/${id}${action === 'retry' ? '/retry' : ''}`, {
+        method: action === 'retry' ? 'POST' : 'DELETE',
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || `Could not ${action} document`);
@@ -147,8 +159,8 @@ export default function App() {
     if (!question.trim() || !conversation) return;
     setBusy(true); setError('');
     try {
-      const response = await fetch(`${API}/conversations/${conversation}/messages`, {
-        method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' },
+      const response = await apiFetch(`/conversations/${conversation}/messages`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
       });
       const result = await response.json();
@@ -165,7 +177,7 @@ export default function App() {
 
   async function rateMessage(id: string, rating: number) {
     try {
-      const response = await fetch(`${API}/messages/${id}/feedback`, { method: 'POST', headers: { 'X-User-Id': USER, 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }) });
+      const response = await apiFetch(`/messages/${id}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }) });
       if (!response.ok) throw new Error('Could not save feedback');
       setMessages(current => current.map(message => message.id === id ? { ...message, rating } : message));
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
@@ -175,6 +187,9 @@ export default function App() {
   const filePicker = (onChange: (file?: File) => void) => (
     <input type="file" accept=".pdf,.docx,.md,.markdown" onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; onChange(file); }} />
   );
+
+  if (!authReady) return <main className="auth-screen"><p>Checking your sign in…</p></main>;
+  if (!isLocalAuth && !authUser) return <main className="auth-screen"><section><span className="mark"><Sparkles size={19} /></span><h1>Sign in to ContextOS</h1><p>{error || 'Use your organization account to access workspace knowledge.'}</p><button onClick={() => beginSignIn().catch(e => setError(e instanceof Error ? e.message : 'Could not start sign in.'))}>Sign in</button></section></main>;
 
   return <div className="shell">
     <aside className="sidebar">
@@ -187,12 +202,12 @@ export default function App() {
       <div className="chat-list">{conversations.map(item => <button key={item.id} className={`chat-link ${conversation === item.id ? 'selected' : ''}`} onClick={() => setConversation(item.id)}><BookOpen size={14} /><span>{item.title}</span></button>)}</div>
       <div className="sidebar-bottom">
         <div className="secure"><ShieldCheck size={16} /><span>Workspace protected<br /><small>Your data stays scoped</small></span></div>
-        <div className="profile"><div className="avatar">JD</div><div>Jordan Davis<small>Workspace admin</small></div><span className="dots">•••</span></div>
+        <div className="profile"><div className="avatar">{isLocalAuth ? 'JD' : String(authUser?.profile.name || authUser?.profile.preferred_username || 'U').slice(0, 2).toUpperCase()}</div><div>{isLocalAuth ? 'Jordan Davis' : String(authUser?.profile.name || authUser?.profile.preferred_username || 'Signed in')}<small>{isLocalAuth ? 'Local demo user' : 'Signed in'}</small></div>{isLocalAuth ? <span className="dots">•••</span> : <button className="signout" onClick={() => signOut().catch(e => setError(e instanceof Error ? e.message : 'Could not sign out.'))}>Sign out</button>}</div>
       </div>
     </aside>
 
     <main className="main">
-      <header><div><div className="eyebrow">PRODUCT KNOWLEDGE <span> / </span> ASSISTANT</div><h1>Ask your knowledge base</h1><p className="subtitle">Answers grounded in your team’s documents, with sources you can verify.</p></div><div className="status"><i /> Local demo</div></header>
+      <header><div><div className="eyebrow">PRODUCT KNOWLEDGE <span> / </span> ASSISTANT</div><h1>Ask your knowledge base</h1><p className="subtitle">Answers grounded in your team’s documents, with sources you can verify.</p></div><div className="status"><i /> {isLocalAuth ? 'Local demo' : 'Signed in'}</div></header>
       {error && <div className="error" role="alert">{error}</div>}
       <section className="content">
         <div className="chat-area">
